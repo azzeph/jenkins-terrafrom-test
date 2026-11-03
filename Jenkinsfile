@@ -83,6 +83,31 @@ pipeline {
 
         booleanParam(name: 'PLAN_WITH_DETAILS', defaultValue: false,
                description: 'Show a detailed plan (-out + `terraform show`).')
+
+        // --- ansible --------------------------------------------------------
+        booleanParam(name: 'RUN_ANSIBLE', defaultValue: true,
+               description: 'After Terraform, run Ansible against the VMs. The inventory environment is taken from the git branch name (ansible/inventory/<branch>/hosts.ini).')
+
+        string(name: 'ANSIBLE_PLAYBOOK', defaultValue: 'ansible/site.yml',
+               description: 'Playbook to run (relative to the repository root).')
+
+        booleanParam(name: 'ANSIBLE_DYNAMIC_INVENTORY', defaultValue: true,
+               description: 'Use scripts/terraform_inventory.py directly as an executable (dynamic) inventory, built from terraform output for the branch environment, instead of the generated per-branch hosts.ini file.')
+
+        string(name: 'ANSIBLE_LIMIT', defaultValue: '',
+               description: 'Ansible --limit (host or group). Empty -> all hosts of the branch environment.')
+
+        string(name: 'ANSIBLE_TAGS', defaultValue: '',
+               description: 'Ansible --tags (comma separated). Empty -> all tasks.')
+
+        string(name: 'ANSIBLE_EXTRA_VARS', defaultValue: '',
+               description: 'Extra vars for ansible-playbook as key=value pairs.')
+
+        booleanParam(name: 'ANSIBLE_CHECK_MODE', defaultValue: false,
+               description: 'Run Ansible in check (dry-run) mode.')
+
+        booleanParam(name: 'ANSIBLE_MANUAL_APPROVE', defaultValue: true,
+               description: 'Pause at a manual confirmation stage before running Ansible (apply/destroy are already gated by Confirm).')
     }
 
     environment {
@@ -90,6 +115,14 @@ pipeline {
         TF_INPUT         = '0'
         PROJECT          = "${params.PROJECT_NAME}"
         WORKDIR          = "${env.WORKSPACE}"
+
+        // ansible-core >= 2.13: the old 'yaml' stdout callback was removed.
+        ANSIBLE_FORCE_COLOR            = '1'
+        ANSIBLE_HOST_KEY_CHECKING      = 'False'
+        ANSIBLE_STDOUT_CALLBACK        = 'default'
+        ANSIBLE_CALLBACK_RESULT_FORMAT = 'yaml'
+        ANSIBLE_INVENTORY_ROOT         = 'ansible/inventory'
+        ANSIBLE_SCRIPT                 = 'scripts/terraform_inventory.py'
     }
 
     options {
@@ -103,6 +136,40 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // The Ansible environment is derived from the git branch name:
+        //   main / feature/x  ->  ansible/inventory/main, ansible/inventory/feature-x
+        // ------------------------------------------------------------------
+        stage('Resolve environment') {
+            steps {
+                script {
+                    def branch = env.BRANCH_NAME?.trim()
+                    if (!branch) {
+                        branch = sh(
+                            script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || true',
+                            returnStdout: true
+                        ).trim()
+                    }
+                    if (!branch || branch == 'HEAD') {
+                        branch = 'local'
+                    }
+                    // Same sanitisation as sanitize_branch() in
+                    // scripts/terraform_inventory.py so the directory name matches.
+                    def envName = branch.trim()
+                        .replaceAll('[/\\\\ :]', '-')
+                        .replaceAll('-{2,}', '-')
+                        .replaceAll('^[-.]+|[-.]+$', '')
+                    if (!envName) {
+                        envName = 'local'
+                    }
+                    env.ANSIBLE_ENV             = envName
+                    env.ANSIBLE_INVENTORY_DIR   = "${env.ANSIBLE_INVENTORY_ROOT}/${envName}"
+                    env.ANSIBLE_INVENTORY       = "${env.ANSIBLE_INVENTORY_DIR}/hosts.ini"
+                    echo "Branch '${branch}' -> Ansible environment '${envName}' (${env.ANSIBLE_INVENTORY})"
+                }
             }
         }
 
@@ -242,6 +309,140 @@ pipeline {
                 }
             }
         }
+        // ------------------------------------------------------------------
+        // ANSIBLE
+        // ------------------------------------------------------------------
+        stage('Ansible: generate inventory') {
+            when { expression { params.RUN_ANSIBLE } }
+            steps {
+                script {
+                    sh """
+                        set -e
+                        chmod +x '${env.ANSIBLE_SCRIPT}' 2>/dev/null || true
+                        python3 '${env.ANSIBLE_SCRIPT}' \\
+                            --terraform-dir "${env.WORKSPACE}" \\
+                            --branch '${env.ANSIBLE_ENV}' \\
+                            --inventory-root '${env.ANSIBLE_INVENTORY_ROOT}'
+                        echo '---------------- ${env.ANSIBLE_INVENTORY} ----------------'
+                        cat '${env.ANSIBLE_INVENTORY}'
+                        echo '-----------------------------------------------------------'
+                    """
+                }
+            }
+        }
+
+        stage('Ansible: manual approval') {
+            when { expression { params.RUN_ANSIBLE && params.ANSIBLE_MANUAL_APPROVE } }
+            steps {
+                script {
+                    def resp = input(
+                        message: "Run Ansible for environment '${env.ANSIBLE_ENV}' " +
+                                 "(inventory ${env.ANSIBLE_INVENTORY}). Adjust the options and press Proceed, or Abort.",
+                        ok: 'Run Ansible',
+                        submitter: '',
+                        submitterParameter: 'APPROVED_BY',
+                        parameters: [
+                            string(name: 'PLAYBOOK',
+                                   defaultValue: params.ANSIBLE_PLAYBOOK ?: 'ansible/site.yml',
+                                   description: 'Playbook (relative to the repository root).'),
+                            string(name: 'LIMIT',
+                                   defaultValue: params.ANSIBLE_LIMIT ?: '',
+                                   description: '--limit: host or group (empty = all hosts of this environment).'),
+                            string(name: 'TAGS',
+                                   defaultValue: params.ANSIBLE_TAGS ?: '',
+                                   description: '--tags (comma separated, empty = all tasks).'),
+                            string(name: 'SKIP_TAGS',
+                                   defaultValue: '',
+                                   description: '--skip-tags (comma separated, optional).'),
+                            text(name: 'EXTRA_VARS',
+                                 defaultValue: params.ANSIBLE_EXTRA_VARS ?: '',
+                                 description: '--extra-vars (key=value key2=value2, optional).'),
+                            booleanParam(name: 'CHECK_MODE',
+                                         defaultValue: params.ANSIBLE_CHECK_MODE,
+                                         description: 'Dry run (--check).'),
+                            booleanParam(name: 'DYNAMIC_INVENTORY',
+                                         defaultValue: params.ANSIBLE_DYNAMIC_INVENTORY,
+                                         description: 'Use the dynamic inventory script instead of the generated hosts.ini.'),
+                            string(name: 'FORKS',
+                                   defaultValue: '',
+                                   description: '--forks (empty = ansible.cfg default).'),
+                            booleanParam(name: 'CONFIRM', defaultValue: true,
+                                         description: 'Must stay checked to run Ansible. Uncheck to skip.')
+                        ]
+                    )
+
+                    if (!resp.CONFIRM) {
+                        echo 'Ansible run NOT confirmed - skipping.'
+                        env.ANSIBLE_SKIPPED = 'true'
+                        return
+                    }
+
+                    echo "Ansible approved by: ${resp.APPROVED_BY ?: 'unknown'}"
+
+                    env.ANSIBLE_PLAYBOOK_RUN    = resp.PLAYBOOK
+                    env.ANSIBLE_LIMIT_RUN       = resp.LIMIT
+                    env.ANSIBLE_TAGS_RUN        = resp.TAGS
+                    env.ANSIBLE_SKIP_TAGS_RUN   = resp.SKIP_TAGS
+                    env.ANSIBLE_EXTRA_VARS_RUN  = resp.EXTRA_VARS
+                    env.ANSIBLE_CHECK_MODE_RUN  = resp.CHECK_MODE.toString()
+                    env.ANSIBLE_DYNAMIC_RUN     = resp.DYNAMIC_INVENTORY.toString()
+                    env.ANSIBLE_FORKS_RUN       = resp.FORKS
+                    env.ANSIBLE_APPROVED        = 'true'
+                }
+            }
+        }
+
+        stage('Ansible: run playbook') {
+            when {
+                expression {
+                    params.RUN_ANSIBLE &&
+                    (params.ANSIBLE_MANUAL_APPROVE ? env.ANSIBLE_APPROVED == 'true' : true)
+                }
+            }
+            steps {
+                script {
+                    // Manual stage values win; otherwise fall back to job params.
+                    def playbook  = env.ANSIBLE_PLAYBOOK_RUN    ?: params.ANSIBLE_PLAYBOOK
+                    def limit     = env.ANSIBLE_LIMIT_RUN       ?: params.ANSIBLE_LIMIT
+                    def tags      = env.ANSIBLE_TAGS_RUN        ?: params.ANSIBLE_TAGS
+                    def skipTags  = env.ANSIBLE_SKIP_TAGS_RUN
+                    def extraVars = env.ANSIBLE_EXTRA_VARS_RUN  ?: params.ANSIBLE_EXTRA_VARS
+                    def checkMode = env.ANSIBLE_CHECK_MODE_RUN  ? env.ANSIBLE_CHECK_MODE_RUN.toBoolean() : params.ANSIBLE_CHECK_MODE
+                    def dynInv    = env.ANSIBLE_DYNAMIC_RUN     ? env.ANSIBLE_DYNAMIC_RUN.toBoolean()    : params.ANSIBLE_DYNAMIC_INVENTORY
+                    def forks     = env.ANSIBLE_FORKS_RUN
+
+                    def inventory = dynInv
+                        ? "${env.WORKSPACE}/${env.ANSIBLE_SCRIPT}"
+                        : "${env.WORKSPACE}/${env.ANSIBLE_INVENTORY}"
+
+                    // ansible-playbook runs from ansible/, so strip the prefix.
+                    def pb = (playbook ?: 'ansible/site.yml').trim()
+                    if (pb.startsWith('ansible/')) { pb = pb.substring('ansible/'.length()) }
+
+                    def args = []
+                    // Expose the environment name to the playbook so tasks can
+                    // behave per branch (e.g. "{{ env_name }}" in group_vars).
+                    args << "-e 'env_name=${env.ANSIBLE_ENV}'"
+                    if (limit?.trim())     { args << "--limit '${limit.trim()}'" }
+                    if (tags?.trim())      { args << "--tags '${tags.trim()}'" }
+                    if (skipTags?.trim())  { args << "--skip-tags '${skipTags.trim()}'" }
+                    if (extraVars?.trim()) { args << "--extra-vars '${shellEscape(extraVars.trim())}'" }
+                    if (forks?.trim())     { args << "--forks '${forks.trim()}'" }
+                    if (checkMode)         { args << '--check' }
+
+                    echo "Environment: ${env.ANSIBLE_ENV}"
+                    echo "Inventory  : ${inventory}"
+                    echo "Playbook   : ${pb}"
+                    echo "Options    : ${args.join(' ')}"
+
+                    sh """
+                        set -e
+                        cd 'ansible'
+                        ansible-playbook -i '${inventory}' ${args.join(' ')} '${pb}'
+                    """
+                }
+            }
+        }
     }
 
     post {
@@ -252,6 +453,7 @@ pipeline {
             // For a shared/robust setup, configure a remote backend instead
             // (see README) and then you may safely enable cleanWs().
             archiveArtifacts artifacts: 'tf_outputs.json, ssh_commands.txt, terraform.tfstate*, .terraform.lock.hcl', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'ansible/inventory/**/hosts.ini', allowEmptyArchive: true
         }
         success {
             echo 'Pipeline finished successfully.'
@@ -260,4 +462,13 @@ pipeline {
             echo 'Pipeline FAILED.'
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+// Escape single quotes so a value can be embedded in a single-quoted shell string.
+def shellEscape(String s) {
+    return s.replace("'", "'" + (char) 92 + "''")
 }

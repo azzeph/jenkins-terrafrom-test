@@ -23,15 +23,14 @@ Every VM gets:
 ├── base_image.tf            # shared base cloud image volume
 ├── outputs.tf               # hostname / IP / MAC / SSH per VM
 ├── terraform.tfvars.example # copy -> terraform.tfvars and edit
-├── Jenkinsfile              # parameterised Terraform CI pipeline
+├── Jenkinsfile              # parameterised pipeline: Terraform + Ansible
 ├── scripts/
-│   └── terraform_inventory.py   # Terraform -> Ansible INI inventory
+│   └── terraform_inventory.py   # Terraform -> Ansible dynamic inventory
 ├── ansible/
-│   ├── Jenkinsfile          # parameterised Ansible pipeline
 │   ├── ansible.cfg
 │   ├── site.yml             # sample playbook
 │   └── inventory/
-│       └── <branch>/hosts.ini   # generated, one dir per branch
+│       └── <branch>/hosts.ini   # generated, one dir (environment) per branch
 └── modules/
     ├── network/             # reusable libvirt network (NAT or isolated)
     │   ├── main.tf
@@ -274,50 +273,41 @@ Options: `--terraform-dir`, `--branch`, `--inventory-root`, `--output`,
 `--group`, `--no-mac`, `--host-key-checking`, `--dry-run`, and the dynamic
 inventory protocol flags `--list` / `--host`.
 
-### Ansible pipeline
+### Ansible stage (in the same pipeline)
 
-`ansible/Jenkinsfile` is a second (parameterised) pipeline that:
+The root `Jenkinsfile` also runs **Ansible against the VMs created by the
+Terraform stages**. The **environment name is taken from the git branch**
+(`BRANCH_NAME`, else `git rev-parse --abbrev-ref HEAD`, else `local`) and
+drives everything, exactly like `scripts/terraform_inventory.py`:
 
-1. resolves the branch (`BRANCH_NAME`, else git, else `local`),
-2. regenerates `ansible/inventory/<branch>/hosts.ini` from Terraform,
-3. runs `ansible-playbook --syntax-check`,
-4. runs the playbook — automatically (**auto** mode) or after a **manual
-   confirmation gate** (**manual** mode, the default).
+```
+branch main       -> environment main      -> ansible/inventory/main/hosts.ini
+branch feature/x  -> environment feature-x -> ansible/inventory/feature-x/hosts.ini
+```
+
+Pipeline flow (after the Terraform stages):
+
+1. **Ansible: generate inventory** — runs `scripts/terraform_inventory.py`
+   with `--branch <environment>`, producing `ansible/inventory/<branch>/hosts.ini`
+   from the fresh `terraform output -json vms`;
+2. **Ansible: manual approval** — an `input` gate (unless
+   `ANSIBLE_MANUAL_APPROVE=false`) where the operator can override playbook,
+   limit, tags, extra vars, check mode and the inventory source per run;
+3. **Ansible: run playbook** — `ansible-playbook` with `env_name=<branch>`
+   extra var plus one of the inventories below.
 
 | Parameter | Purpose |
 |---|---|
-| `RUN_MODE` | `manual` (default) — pause at the manual stage; `auto` — run immediately |
-| `TERRAFORM_DIR` | Terraform directory (empty -> repo root) |
-| `PLAYBOOK` | playbook path (default `ansible/site.yml`) |
-| `LIMIT` / `TAGS` / `EXTRA_VARS` | passed through to Ansible |
-| `CHECK_MODE` | dry-run (`--check`) |
-| `GENERATE_INVENTORY` | regenerate the inventory first |
-| `USE_DYNAMIC_INVENTORY` | use `scripts/terraform_inventory.py` directly as an executable (dynamic) inventory instead of the generated `hosts.ini` |
+| `RUN_ANSIBLE` | run the Ansible stages at all (default true) |
+| `ANSIBLE_PLAYBOOK` | playbook path (default `ansible/site.yml`) |
+| `ANSIBLE_DYNAMIC_INVENTORY` | true (default) = use `scripts/terraform_inventory.py` directly as an executable dynamic inventory; false = use the generated per-branch `hosts.ini` |
+| `ANSIBLE_LIMIT` / `ANSIBLE_TAGS` / `ANSIBLE_EXTRA_VARS` | passed through to Ansible |
+| `ANSIBLE_CHECK_MODE` | dry-run (`--check`) |
+| `ANSIBLE_MANUAL_APPROVE` | show the manual approval stage first |
 
-#### The manual stage
-
-With `RUN_MODE=manual` the build stops at **"Manual: run Ansible"** and shows
-an input dialog. The operator fills in / overrides per run:
-
-| Field | Meaning |
-|---|---|
-| `PLAYBOOK` | playbook to execute |
-| `LIMIT` | host or group (`--limit`), empty = all |
-| `TAGS` / `SKIP_TAGS` | `--tags` / `--skip-tags` |
-| `EXTRA_VARS` | `--extra-vars` as `key=value key2=value2` |
-| `CHECK_MODE` | dry run (`--check`) |
-| `USE_DYNAMIC_INVENTORY` | dynamic script vs generated `hosts.ini` |
-| `FORKS` | `--forks` (empty = ansible.cfg default) |
-| `CONFIRM` | must stay checked; uncheck to skip the run |
-
-The approver's Jenkins user is captured via `submitterParameter` and echoed to
-the log. Aborting the input aborts the build; unchecking `CONFIRM` finishes it
-as a no-op.
-
-Dynamic inventory in the pipeline resolves to
-`${WORKSPACE}/scripts/terraform_inventory.py`; the script locates the
-Terraform directory itself and needs no extra flags, so the inventory always
-reflects the current `terraform output -json vms`.
+The `env_name` extra var lets tasks address the environment, e.g.
+`"{{ env_name }}"` in playbooks or group_vars. Aborting the approval dialog
+aborts the build; unchecking `CONFIRM` skips the Ansible run as a no-op.
 
 Ansible config lives in `ansible/ansible.cfg`; a sample playbook is
 `ansible/site.yml`. Generated inventories are git-ignored — see
