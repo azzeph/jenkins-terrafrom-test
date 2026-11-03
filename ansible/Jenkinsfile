@@ -1,0 +1,302 @@
+// ---------------------------------------------------------------------------
+// Jenkins pipeline: run Ansible against the VMs created by Terraform.
+//
+// 1. Regenerates the inventory from `terraform output -json vms` into
+//        ansible/inventory/<BRANCH_NAME>/hosts.ini
+// 2. Runs ansible-playbook against that inventory.
+//
+// The inventory directory is keyed by the git branch, so parallel branches
+// (environments) keep separate inventories.
+// ---------------------------------------------------------------------------
+
+pipeline {
+    agent any
+
+    parameters {
+        choice(name: 'RUN_MODE', choices: ['manual', 'auto'],
+               description: 'manual = stop at the "Manual: run Ansible" stage and wait for a human to fill in the options. auto = run immediately with the parameters below.')
+
+        string(name: 'TERRAFORM_DIR', defaultValue: '',
+               description: 'Directory of the Terraform config (empty -> repository root).')
+
+        string(name: 'PLAYBOOK', defaultValue: 'ansible/site.yml',
+               description: 'Playbook to run (relative to the repository root). Used in auto mode / as the manual default.')
+
+        string(name: 'LIMIT', defaultValue: '',
+               description: 'Ansible --limit (host or group). Empty -> all hosts in the inventory.')
+
+        string(name: 'TAGS', defaultValue: '',
+               description: 'Ansible --tags (comma separated). Empty -> all tasks.')
+
+        string(name: 'EXTRA_VARS', defaultValue: '',
+               description: 'Extra vars passed to ansible-playbook as key=value pairs.')
+
+        booleanParam(name: 'CHECK_MODE', defaultValue: false,
+               description: 'Run in check (dry-run) mode.')
+
+        booleanParam(name: 'GENERATE_INVENTORY', defaultValue: true,
+               description: 'Regenerate the inventory from Terraform before running.')
+
+        booleanParam(name: 'USE_DYNAMIC_INVENTORY', defaultValue: true,
+               description: 'Use scripts/terraform_inventory.py directly as an executable (dynamic) inventory instead of the generated hosts.ini file.')
+    }
+
+    environment {
+        ANSIBLE_FORCE_COLOR   = '1'
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+        // ansible-core >= 2.13: 'yaml' callback was removed; use default + result_format.
+        ANSIBLE_STDOUT_CALLBACK = 'default'
+        ANSIBLE_CALLBACK_RESULT_FORMAT = 'yaml'
+        // Directories are relative to the repository root (the checkout).
+        ANSIBLE_DIR    = 'ansible'
+        INVENTORY_ROOT = 'ansible/inventory'
+    }
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Resolve branch') {
+            steps {
+                script {
+                    // Jenkins sets BRANCH_NAME for multibranch pipelines; fall
+                    // back to the git branch, then to $BRANCH_NAME / 'local'.
+                    def branch = env.BRANCH_NAME?.trim()
+                    if (!branch) {
+                        branch = sh(
+                            script: "git rev-parse --abbrev-ref HEAD 2>/dev/null || true",
+                            returnStdout: true
+                        ).trim()
+                    }
+                    if (!branch || branch == 'HEAD') {
+                        branch = env.BRANCH_NAME ?: 'local'
+                    }
+                    // Same sanitisation as the Python script (filesystem-safe).
+                    branch = branch.replaceAll('[/\\\\ :]', '-').replaceAll('-{2,}', '-')
+                    env.INVENTORY_BRANCH = branch
+                    env.INVENTORY_PATH   = "${env.INVENTORY_ROOT}/${branch}/hosts.ini"
+                    echo "Branch: ${branch} -> inventory ${env.INVENTORY_PATH}"
+                }
+            }
+        }
+
+        stage('Generate inventory') {
+            when { expression { params.GENERATE_INVENTORY } }
+            steps {
+                script {
+                    def tfDir = params.TERRAFORM_DIR?.trim() ? params.TERRAFORM_DIR.trim() : '.'
+                    sh """
+                        set -e
+                        python3 scripts/terraform_inventory.py \\
+                            --terraform-dir '${tfDir}' \\
+                            --branch '${env.INVENTORY_BRANCH}' \\
+                            --inventory-root '${env.INVENTORY_ROOT}'
+                        echo '---------------- inventory ----------------'
+                        cat '${env.INVENTORY_PATH}'
+                        echo '-------------------------------------------'
+                    """
+                }
+            }
+        }
+
+        stage('Ansible syntax check') {
+            steps {
+                script {
+                    def pb = playbookRelPath(params.PLAYBOOK)
+                    sh """
+                        set -e
+                        cd '${env.ANSIBLE_DIR}'
+                        ansible-playbook -i '${inventorySource()}' --syntax-check '${pb}'
+                    """
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // MANUAL STAGE
+        //   Run mode 'manual' pauses here. A human picks the playbook, limit,
+        //   tags, extra vars and whether to run in check mode, then approves.
+        //   The inventory can be the generated hosts.ini or the dynamic
+        //   script (scripts/terraform_inventory.py) - chosen via
+        //   USE_DYNAMIC_INVENTORY or overridden per-run below.
+        // ------------------------------------------------------------------
+        stage('Manual: run Ansible') {
+            when { expression { params.RUN_MODE == 'manual' } }
+            steps {
+                script {
+                    def inputResp = input(
+                        message: "Run Ansible for branch '${env.INVENTORY_BRANCH}'. " +
+                                 "Inventory: ${env.INVENTORY_PATH}. Fill in the options and approve, or abort.",
+                        id: 'ansible-manual-run',
+                        ok: 'Run ansible-playbook',
+                        submitter: '',
+                        submitterParameter: 'APPROVED_BY',
+                        parameters: [
+                            string(name: 'PLAYBOOK',
+                                   defaultValue: params.PLAYBOOK ?: 'ansible/site.yml',
+                                   description: 'Playbook (relative to repo root, e.g. ansible/site.yml)'),
+                            string(name: 'LIMIT',
+                                   defaultValue: params.LIMIT ?: '',
+                                   description: '--limit: host or group (empty = all)'),
+                            string(name: 'TAGS',
+                                   defaultValue: params.TAGS ?: '',
+                                   description: '--tags (comma separated, empty = all tasks)'),
+                            string(name: 'SKIP_TAGS',
+                                   defaultValue: '',
+                                   description: '--skip-tags (comma separated, optional)'),
+                            text(name: 'EXTRA_VARS',
+                                 defaultValue: params.EXTRA_VARS ?: '',
+                                 description: '--extra-vars (key=value key2=value2, optional)'),
+                            booleanParam(name: 'CHECK_MODE',
+                                         defaultValue: params.CHECK_MODE,
+                                         description: 'Dry run (--check)'),
+                            booleanParam(name: 'USE_DYNAMIC_INVENTORY',
+                                         defaultValue: params.USE_DYNAMIC_INVENTORY,
+                                         description: 'Use the dynamic inventory script instead of hosts.ini'),
+                            string(name: 'FORKS',
+                                   defaultValue: '',
+                                   description: '--forks (empty = ansible.cfg default)'),
+                            booleanParam(name: 'CONFIRM',
+                                         defaultValue: true,
+                                         description: 'Must stay checked to actually run (unchecking skips the run)')
+                        ]
+                    )
+
+                    if (!inputResp.CONFIRM) {
+                        echo 'Manual Ansible run NOT confirmed - skipping.'
+                        env.ANSIBLE_SKIPPED = 'true'
+                        return
+                    }
+
+                    echo "Approved by: ${inputResp.APPROVED_BY ?: 'unknown'}"
+
+                    // Store the manual choices so later stages / logs can use them.
+                    env.MANUAL_PLAYBOOK            = inputResp.PLAYBOOK
+                    env.MANUAL_LIMIT               = inputResp.LIMIT
+                    env.MANUAL_TAGS                = inputResp.TAGS
+                    env.MANUAL_SKIP_TAGS           = inputResp.SKIP_TAGS
+                    env.MANUAL_EXTRA_VARS          = inputResp.EXTRA_VARS
+                    env.MANUAL_CHECK_MODE          = inputResp.CHECK_MODE.toString()
+                    env.MANUAL_DYNAMIC_INVENTORY   = inputResp.USE_DYNAMIC_INVENTORY.toString()
+                    env.MANUAL_FORKS               = inputResp.FORKS
+
+                    def inv = inputResp.USE_DYNAMIC_INVENTORY ? dynamicInventoryPath() : generatedInventoryPath()
+
+                    runPlaybook(
+                        playbook : inputResp.PLAYBOOK,
+                        inventory: inv,
+                        limit    : inputResp.LIMIT,
+                        tags     : inputResp.TAGS,
+                        skipTags : inputResp.SKIP_TAGS,
+                        extraVars: inputResp.EXTRA_VARS,
+                        checkMode: inputResp.CHECK_MODE,
+                        forks    : inputResp.FORKS
+                    )
+                }
+            }
+        }
+
+        stage('Run playbook') {
+            when { expression { params.RUN_MODE != 'manual' } }
+            steps {
+                script {
+                    runPlaybook(
+                        playbook : params.PLAYBOOK,
+                        inventory: inventorySource(),
+                        limit    : params.LIMIT,
+                        tags     : params.TAGS,
+                        extraVars: params.EXTRA_VARS,
+                        checkMode: params.CHECK_MODE,
+                        forks    : ''
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: "ansible/inventory/**/hosts.ini", allowEmptyArchive: true
+        }
+        success {
+            echo 'Ansible run finished successfully.'
+        }
+        failure {
+            echo 'Ansible run FAILED.'
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+// Strip the leading 'ansible/' because ansible-playbook runs from ansible/.
+def playbookRelPath(String playbook) {
+    def p = (playbook ?: 'ansible/site.yml').trim()
+    if (!p) { p = 'ansible/site.yml' }
+    return p.startsWith('ansible/') ? p.substring('ansible/'.length()) : p
+}
+
+// The generated, branch-scoped INI inventory (absolute path inside the job).
+def generatedInventoryPath() {
+    return "${env.WORKSPACE}/${env.INVENTORY_PATH}"
+}
+
+// The executable dynamic-inventory script (must exist and be executable).
+def dynamicInventoryPath() {
+    return "${env.WORKSPACE}/scripts/terraform_inventory.py"
+}
+
+// Which inventory to hand to ansible-playbook in the automatic stages.
+def inventorySource() {
+    return params.USE_DYNAMIC_INVENTORY ? dynamicInventoryPath() : generatedInventoryPath()
+}
+
+// Build and execute the ansible-playbook command.
+def runPlaybook(Map opts) {
+    def pb = playbookRelPath(opts.playbook)
+    def args = []
+
+    def limit     = opts.limit?.toString()?.trim()
+    def tags      = opts.tags?.toString()?.trim()
+    def skipTags  = opts.skipTags?.toString()?.trim()
+    def extraVars = opts.extraVars?.toString()?.trim()
+    def forks     = opts.forks?.toString()?.trim()
+
+    if (limit)     { args << "--limit '${limit}'" }
+    if (tags)      { args << "--tags '${tags}'" }
+    if (skipTags)  { args << "--skip-tags '${skipTags}'" }
+    if (extraVars) { args << "--extra-vars '${shellEscape(extraVars)}'" }
+    if (forks)     { args << "--forks '${forks}'" }
+    if (opts.checkMode) { args << '--check' }
+
+    def inv = opts.inventory
+    def extra = args.join(' ')
+
+    echo "Inventory : ${inv}"
+    echo "Playbook  : ${pb}"
+    echo "Options   : ${extra ?: '(none)'}"
+
+    sh """
+        set -e
+        cd '${env.ANSIBLE_DIR}'
+        chmod +x '${dynamicInventoryPath()}' 2>/dev/null || true
+        ansible-playbook -i '${inv}' ${extra} '${pb}'
+    """
+}
+
+// Escape single quotes for safe embedding inside a single-quoted shell string.
+def shellEscape(String s) {
+    return s.replace("'", "'" + (char) 92 + "''")
+}

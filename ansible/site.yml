@@ -1,0 +1,23 @@
+---
+# Example playbook run by the Ansible Jenkins pipeline.
+#
+# The inventory is generated from Terraform outputs by
+# scripts/terraform_inventory.py, so `hosts: vms` matches every VM.
+- name: Bootstrap the lab VMs
+  hosts: vms
+  gather_facts: true
+  become: false
+
+  tasks:
+    - name: Show the target host
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} -> {{ ansible_host }} (user {{ ansible_user }})"
+
+    - name: Wait until SSH is reachable
+      ansible.builtin.wait_for_connection:
+        timeout: 120
+        delay: 2
+
+    - name: Gather basic facts
+      ansible.builtin.debug:
+        msg: "{{ ansible_distribution }} {{ ansible_distribution_version }} / kernel {{ ansible_kernel }}"

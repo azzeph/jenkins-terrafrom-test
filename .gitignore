@@ -12,3 +12,15 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
+
+# Ansible generated inventories (per branch)
+ansible/inventory/*/
+!ansible/inventory/.gitkeep
+!ansible/inventory/README.md
+
+# Python
+__pycache__/
+*.pyc
+
+# Ansible retry / cache
+ansible/*.retry
