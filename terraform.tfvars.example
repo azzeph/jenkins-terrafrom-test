@@ -1,36 +1,28 @@
-# Copy to terraform.tfvars and adjust to your environment.
-
-# The project name drives generated names:
-#   network "<project>-net", domain "<project>.local", VMs "<project>-node1"...
-project_name = "lab"
-
+# Libvirt host connection
 libvirt_uri = "qemu:///system"
 
-pool_name       = "default"
-storage_pool_dir = "/var/lib/libvirt/images"
-base_image_url  = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
-base_image_name = "ubuntu-noble-base.qcow2"
-vm_disk_size    = 21474836480 # 20 GiB
+# Libvirt infrastructure settings
+storage_pool_name = "default"
+network_name      = "default"
 
-# network_name / network_domain derive from project_name when left empty.
-network_name      = ""
-network_cidr      = "10.10.0.0/24"
-network_gateway   = "10.10.0.1"
-network_domain    = ""
-network_isolation = false # false = NAT, true = isolated
+# Base cloud image (Ubuntu 22.04 LTS Cloud Image)
+base_image_name = "ubuntu-22.04-base.qcow2"
+base_image_url  = "https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-amd64.img"
 
-admin_user          = "ubuntu"
-ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+# Cloud-init authentication
+admin_username = "ubuntu"
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyNotRealDoNotUseInProdPlaceholder user@workstation"
 
-# --- VM auto-generation ----------------------------------------------------
-vm_count              = 2
-vm_name_prefix        = ""    # empty -> "<project>-node"
-vm_ip_start_offset    = 11    # first VM gets x.x.x.11
-vm_default_vcpu       = 2
-vm_default_memory_mib = 2048
-
-# --- Explicit override (optional) ------------------------------------------
-# vms = {
-#   lab-node1 = { hostname = "lab-node1", ip = "10.10.0.11", vcpu = 2, memory_mib = 2048 }
-#   lab-node2 = { hostname = "lab-node2", ip = "10.10.0.12", vcpu = 4, memory_mib = 4096 }
-# }
+# Virtual machines configuration
+vms = {
+  "web-srv-01" = {
+    memory        = 2048
+    vcpu          = 2
+    disk_capacity = 10737418240 # 10 GiB
+  }
+  "web-srv-02" = {
+    memory        = 2048
+    vcpu          = 2
+    disk_capacity = 10737418240 # 10 GiB
+  }
+}
