@@ -86,7 +86,7 @@ pipeline {
 
         // --- ansible --------------------------------------------------------
         booleanParam(name: 'RUN_ANSIBLE', defaultValue: true,
-               description: 'After Terraform, run Ansible against the VMs. The inventory environment is taken from the git branch name (ansible/inventory/<branch>/hosts.ini).')
+               description: 'After a successful apply, run Ansible against the VMs. Skipped automatically for ACTION=plan/destroy (nothing to configure). The inventory environment is taken from the git branch name (ansible/inventory/<branch>/hosts.ini).')
 
         string(name: 'ANSIBLE_PLAYBOOK', defaultValue: 'ansible/site.yml',
                description: 'Playbook to run (relative to the repository root).')
@@ -314,7 +314,8 @@ pipeline {
         // ANSIBLE
         // ------------------------------------------------------------------
         stage('Ansible: generate inventory') {
-            when { expression { params.RUN_ANSIBLE } }
+            // Only meaningful after apply: on destroy the VMs no longer exist.
+            when { expression { params.RUN_ANSIBLE && params.ACTION == 'apply' } }
             steps {
                 script {
                     sh """
@@ -333,7 +334,7 @@ pipeline {
         }
 
         stage('Ansible: manual approval') {
-            when { expression { params.RUN_ANSIBLE && params.ANSIBLE_MANUAL_APPROVE } }
+            when { expression { params.RUN_ANSIBLE && params.ACTION == 'apply' && params.ANSIBLE_MANUAL_APPROVE } }
             steps {
                 script {
                     def resp = input(
@@ -397,6 +398,7 @@ pipeline {
             when {
                 expression {
                     params.RUN_ANSIBLE &&
+                    params.ACTION == 'apply' &&
                     (params.ANSIBLE_MANUAL_APPROVE ? env.ANSIBLE_APPROVED == 'true' : true)
                 }
             }
