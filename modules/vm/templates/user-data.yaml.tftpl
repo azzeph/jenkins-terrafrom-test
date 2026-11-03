@@ -1,0 +1,37 @@
+#cloud-config
+hostname: ${hostname}
+fqdn: ${hostname}.${domain}
+manage_etc_hosts: true
+
+users:
+  - name: ${admin_user}
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+ssh_pwauth: false
+disable_root: true
+
+# Force the guest to log to the serial console so `virsh console <name>`
+# shows the full boot instead of appearing to hang.
+write_files:
+  - path: /etc/default/grub.d/99-serial-console.cfg
+    permissions: "0644"
+    content: |
+      GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT console=ttyS0,115200n8 console=tty0"
+      GRUB_TERMINAL="serial console"
+      GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
+
+runcmd:
+  - update-grub || true
+  # Install packages here (not via cloud-init's `packages` module, which runs
+  # before the guest has a working network on some images).
+  - DEBIAN_FRONTEND=noninteractive apt-get update -y || true
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-guest-agent openssh-server curl || true
+  - systemctl enable --now ssh || true
+  - systemctl enable --now qemu-guest-agent || true
+
+final_message: "cloud-init finished for ${hostname} after $UPTIME seconds"

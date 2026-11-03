@@ -1,0 +1,35 @@
+# Copy to terraform.tfvars and adjust to your environment.
+
+# The project name drives generated names:
+#   network "<project>-net", domain "<project>.local", VMs "<project>-node1"...
+project_name = "lab"
+
+libvirt_uri = "qemu:///system"
+
+pool_name       = "default"
+base_image_url  = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+base_image_name = "ubuntu-noble-base.qcow2"
+vm_disk_size    = 21474836480 # 20 GiB
+
+# network_name / network_domain derive from project_name when left empty.
+network_name      = ""
+network_cidr      = "10.10.0.0/24"
+network_gateway   = "10.10.0.1"
+network_domain    = ""
+network_isolation = false # false = NAT, true = isolated
+
+admin_user          = "ubuntu"
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
+# --- VM auto-generation ----------------------------------------------------
+vm_count              = 2
+vm_name_prefix        = ""    # empty -> "<project>-node"
+vm_ip_start_offset    = 11    # first VM gets x.x.x.11
+vm_default_vcpu       = 2
+vm_default_memory_mib = 2048
+
+# --- Explicit override (optional) ------------------------------------------
+# vms = {
+#   lab-node1 = { hostname = "lab-node1", ip = "10.10.0.11", vcpu = 2, memory_mib = 2048 }
+#   lab-node2 = { hostname = "lab-node2", ip = "10.10.0.12", vcpu = 4, memory_mib = 4096 }
+# }

@@ -1,0 +1,18 @@
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ${iface}:
+      match:
+        macaddress: "${mac}"
+      dhcp4: false
+      dhcp6: false
+      addresses:
+        - ${static_ip}/${prefix}
+      routes:
+        - to: default
+          via: ${gateway}
+      nameservers:
+        search: [${domain}]
+        addresses: [9.9.9.9, 1.1.1.1, 8.8.8.8]
+      optional: true
