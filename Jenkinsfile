@@ -79,7 +79,7 @@ pipeline {
 
         // --- behaviour ------------------------------------------------------
         booleanParam(name: 'AUTO_APPROVE', defaultValue: false,
-               description: 'Skip the interactive confirmation. Leave false: apply/destroy will then wait for you to press Proceed.')
+               description: 'Skip the Jenkins Confirm stage. Terraform itself always runs with -auto-approve (Jenkins is not a TTY), so this only controls the interactive gate: false = the Confirm stage waits for you to press Proceed.')
 
         booleanParam(name: 'PLAN_WITH_DETAILS', defaultValue: false,
                description: 'Show a detailed plan (-out + `terraform show`).')
@@ -275,8 +275,10 @@ pipeline {
             when { expression { params.ACTION == 'apply' } }
             steps {
                 script {
-                    def args = params.AUTO_APPROVE ? '-auto-approve' : ''
-                    sh "terraform apply -input=false ${args} -lock=false"
+                    // The approval already happened in the 'Confirm' stage (or was
+                    // skipped via AUTO_APPROVE). Output is not a TTY here, so an
+                    // interactive prompt is impossible -> always -auto-approve.
+                    sh 'terraform apply -input=false -auto-approve -lock=false'
                 }
             }
         }
@@ -285,8 +287,7 @@ pipeline {
             when { expression { params.ACTION == 'destroy' } }
             steps {
                 script {
-                    def args = params.AUTO_APPROVE ? '-auto-approve' : ''
-                    sh "terraform destroy -input=false ${args} -lock=false"
+                    sh 'terraform destroy -input=false -auto-approve -lock=false'
                 }
             }
         }
