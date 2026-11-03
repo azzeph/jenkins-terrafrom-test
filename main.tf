@@ -91,5 +91,5 @@ module "vm" {
   iface_name     = var.iface_name
   domain         = local.network_domain
 
-  depends_on = [module.network]
+  depends_on = [module.network, terraform_data.storage_pool]
 }

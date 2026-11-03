@@ -134,9 +134,12 @@ it unless you set the corresponding variable explicitly:
 | VM name / hostname | `<vm_name_prefix><i>` | `tf-node1`, `tf-node2`, ... |
 | VM IP | `cidrhost(cidr, vm_ip_start_offset + i - 1)` | `10.10.0.11`, `10.10.0.12`, ... |
 
-The storage **pool** is left at the stock `default` pool by design (the pool
-usually pre-exists and holds more than this project). Set `pool_name` to point
-at a dedicated pool if you have one.
+The storage **pool** is the stock `default` pool by default (it usually
+pre-exists and holds more than this project). If you set `pool_name` to a new
+name, it is **created automatically** as a `dir` pool under `storage_pool_dir`
+(`/var/lib/libvirt/images` by default) — the libvirt provider can only create
+volumes inside an existing pool, so this is done with a small idempotent
+`terraform_data` + `virsh pool-define-as/build/start` step.
 
 ## Configuration reference
 
@@ -144,7 +147,8 @@ at a dedicated pool if you have one.
 |---|---|---|
 | `project_name` | `lab` | base name for network/domain/VMs |
 | `libvirt_uri` | `qemu:///system` | libvirt connection URI |
-| `pool_name` | `default` | storage pool |
+| `pool_name` | `default` | storage pool (auto-created if missing) |
+| `storage_pool_dir` | `/var/lib/libvirt/images` | parent dir for an auto-created pool |
 | `base_image_url` | Ubuntu 24.04 cloud image | base image URL |
 | `base_image_name` | `ubuntu-noble-base.qcow2` | base volume name |
 | `vm_disk_size` | `21474836480` (20 GiB) | overlay disk size in bytes |

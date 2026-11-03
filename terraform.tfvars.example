@@ -7,6 +7,7 @@ project_name = "lab"
 libvirt_uri = "qemu:///system"
 
 pool_name       = "default"
+storage_pool_dir = "/var/lib/libvirt/images"
 base_image_url  = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 base_image_name = "ubuntu-noble-base.qcow2"
 vm_disk_size    = 21474836480 # 20 GiB

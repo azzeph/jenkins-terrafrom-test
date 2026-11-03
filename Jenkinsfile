@@ -19,15 +19,18 @@ pipeline {
         string(name: 'PROJECT_NAME', defaultValue: 'tf',
                description: 'Logical project name. Drives network name, DNS domain and VM hostnames.')
 
-        choice(name: 'ACTION', choices: ['apply', 'plan', 'destroy'],
-               description: 'Terraform action to run.')
+        choice(name: 'ACTION', choices: ['plan', 'apply', 'destroy'],
+               description: 'Terraform action to run. Default is `plan` — nothing is created until you choose apply.')
 
         // --- infrastructure -------------------------------------------------
         string(name: 'LIBVIRT_URI', defaultValue: 'qemu:///system',
                description: 'libvirt connection URI.')
 
         string(name: 'POOL_NAME', defaultValue: 'default',
-               description: 'Storage pool for base image, overlays and cloud-init ISOs.')
+               description: 'Storage pool for base image, overlays and cloud-init ISOs. If it does not exist it is created automatically (dir pool).')
+
+        string(name: 'STORAGE_POOL_DIR', defaultValue: '/var/lib/libvirt/images',
+               description: 'Parent directory for an auto-created dedicated storage pool.')
 
         string(name: 'BASE_IMAGE_URL', defaultValue: 'https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img',
                description: 'Cloud image used as backing store for every VM.')
@@ -75,8 +78,8 @@ pipeline {
                description: 'Path to the SSH public key injected into every VM.')
 
         // --- behaviour ------------------------------------------------------
-        booleanParam(name: 'AUTO_APPROVE', defaultValue: true,
-               description: 'Skip the interactive plan confirmation for apply/destroy.')
+        booleanParam(name: 'AUTO_APPROVE', defaultValue: false,
+               description: 'Skip the interactive confirmation. Leave false: apply/destroy will then wait for you to press Proceed.')
 
         booleanParam(name: 'PLAN_WITH_DETAILS', defaultValue: false,
                description: 'Show a detailed plan (-out + `terraform show`).')
@@ -106,13 +109,30 @@ pipeline {
         stage('Prepare tfvars') {
             steps {
                 script {
+                    def banner = [
+                        '===============================================================',
+                        ' Effective parameters for this run',
+                        '===============================================================',
+                        "  ACTION            : ${params.ACTION}",
+                        "  PROJECT_NAME      : ${params.PROJECT_NAME}",
+                        "  VM_COUNT          : ${params.VM_COUNT}",
+                        "  VM_NAME_PREFIX    : '${params.VM_NAME_PREFIX}' (empty -> <project>-node)",
+                        "  NETWORK_CIDR      : ${params.NETWORK_CIDR}",
+                        "  NETWORK_ISOLATION : ${params.NETWORK_ISOLATION}",
+                        "  AUTO_APPROVE      : ${params.AUTO_APPROVE}",
+                        '===============================================================',
+                        " If these are not what you expected, abort and re-run this job",
+                        " via 'Build with Parameters'.",
+                        '===============================================================',
+                    ].join('\n')
+                    echo banner
+
                     // Generate a terraform.tfvars from the pipeline parameters.
-                    // The heredoc keeps Terraform interpolation out of Groovy by
-                    // using a quoted delimiter and explicit string joins.
                     def tfvars = [
                         "project_name     = \"${params.PROJECT_NAME}\"",
                         "libvirt_uri      = \"${params.LIBVIRT_URI}\"",
                         "pool_name        = \"${params.POOL_NAME}\"",
+                        "storage_pool_dir = \"${params.STORAGE_POOL_DIR}\"",
                         "base_image_url   = \"${params.BASE_IMAGE_URL}\"",
                         "vm_disk_size     = ${params.VM_DISK_SIZE}",
                         "network_name     = \"${params.NETWORK_NAME}\"",
@@ -156,6 +176,29 @@ pipeline {
                         archiveArtifacts artifacts: 'plan.txt', allowEmptyArchive: true
                     } else {
                         sh 'terraform plan -input=false -lock=false'
+                    }
+                }
+            }
+        }
+
+        stage('Confirm') {
+            when {
+                expression { params.ACTION == 'apply' || params.ACTION == 'destroy' }
+            }
+            steps {
+                script {
+                    if (params.AUTO_APPROVE) {
+                        echo "AUTO_APPROVE=true -> skipping confirmation for '${params.ACTION}'."
+                    } else {
+                        // Blocks the build until a human clicks Proceed / Abort.
+                        input(
+                            message: "Ready to run 'terraform ${params.ACTION}' for project '${params.PROJECT_NAME}' " +
+                                     "(${params.VM_COUNT} VM(s), network ${params.NETWORK_CIDR}). Proceed?",
+                            ok: 'Proceed',
+                            submitter: '',
+                            submitterParameter: '',
+                            parameters: []
+                        )
                     }
                 }
             }

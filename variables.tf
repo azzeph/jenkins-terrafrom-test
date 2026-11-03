@@ -24,9 +24,15 @@ variable "libvirt_uri" {
 }
 
 variable "pool_name" {
-  description = "The libvirt storage pool used for images and cloud-init ISOs. Defaults to the stock 'default' pool; set to e.g. '<project>-pool' for a dedicated pool."
+  description = "The libvirt storage pool used for images and cloud-init ISOs. Defaults to the stock 'default' pool; set to e.g. '<project>-pool' for a dedicated pool (created automatically)."
   type        = string
   default     = "default"
+}
+
+variable "storage_pool_dir" {
+  description = "Parent directory where a dedicated (dir-type) storage pool is created when pool_name does not exist yet."
+  type        = string
+  default     = "/var/lib/libvirt/images"
 }
 
 variable "base_image_url" {
